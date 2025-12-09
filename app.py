@@ -244,6 +244,7 @@ def validate_excel_file(df: pd.DataFrame) -> tuple[bool, str]:
     """
     엑셀 파일의 필수 컬럼을 검증합니다.
     대소문자 구분 없이 검증합니다.
+    멀티턴 시나리오를 지원합니다 (test_case_id, turn_number).
     
     Args:
         df: 업로드된 DataFrame
@@ -264,6 +265,21 @@ def validate_excel_file(df: pd.DataFrame) -> tuple[bool, str]:
     
     if df.empty:
         return False, "테스트 케이스가 없습니다."
+    
+    # 멀티턴 시나리오 검증 (test_case_id와 turn_number가 모두 있는 경우)
+    has_test_case_id = 'test_case_id' in df_columns_lower or 'TEST_CASE_ID' in df.columns
+    has_turn_number = 'turn_number' in df_columns_lower or 'TURN_NUMBER' in df.columns
+    
+    if has_test_case_id and has_turn_number:
+        # test_case_id별로 turn_number가 1부터 순차적으로 있는지 확인
+        test_case_id_col = df_columns_lower.get('test_case_id') or 'TEST_CASE_ID'
+        turn_number_col = df_columns_lower.get('turn_number') or 'TURN_NUMBER'
+        
+        for test_case_id in df[test_case_id_col].unique():
+            case_turns = df[df[test_case_id_col] == test_case_id][turn_number_col].sort_values()
+            expected_turns = list(range(1, len(case_turns) + 1))
+            if not case_turns.tolist() == expected_turns:
+                return False, f"test_case_id '{test_case_id}'의 turn_number가 순차적이지 않습니다. (1, 2, 3, ... 순서여야 함)"
     
     return True, ""
 
@@ -382,7 +398,7 @@ with st.sidebar:
     uploaded_file = st.file_uploader(
         "엑셀 파일을 선택하세요",
         type=['xlsx', 'xls'],
-        help="필수 컬럼: user_id, lat, lng, is_driving, message, tts_expected"
+        help="필수 컬럼: user_id, lat, lng, is_driving, message, tts_expected\n멀티턴 시나리오: test_case_id, turn_number 추가"
     )
     
     if uploaded_file is not None:
@@ -529,12 +545,19 @@ elif st.session_state.test_results is not None:
     st.markdown("---")
     
     # 필터 및 검색
-    col_filter1, col_filter2 = st.columns([2, 1])
+    col_filter1, col_filter2, col_filter3 = st.columns([2, 1, 1])
     with col_filter1:
         search_query = st.text_input("🔍 검색", value=st.session_state.search_query, placeholder="user_id, message, tts_expected 등으로 검색...")
         st.session_state.search_query = search_query
     with col_filter2:
         pass_fail_filter = st.selectbox("필터", ["전체", "PASS", "FAIL"], key="pass_fail_filter")
+    with col_filter3:
+        # 멀티턴 시나리오인지 확인
+        has_multi_turn = 'test_case_id' in results_df.columns and 'turn_number' in results_df.columns
+        if has_multi_turn:
+            scenario_filter = st.selectbox("시나리오", ["전체"] + sorted(results_df['test_case_id'].dropna().unique().tolist()), key="scenario_filter")
+        else:
+            scenario_filter = "전체"
     
     # 검색 및 필터 적용
     filtered_df = results_df.copy()
@@ -550,11 +573,16 @@ elif st.session_state.test_results is not None:
     if pass_fail_filter != "전체":
         filtered_df = filtered_df[filtered_df['pass/fail'] == pass_fail_filter]
     
+    # 시나리오 필터 적용 (멀티턴 시나리오인 경우)
+    if has_multi_turn and scenario_filter != "전체":
+        filtered_df = filtered_df[filtered_df['test_case_id'] == scenario_filter]
+    
     st.markdown(f"**검색 결과: {len(filtered_df)}개**")
     
-    # 결과 테이블
-    display_columns = ['user_id', 'lng', 'lat', 'message', 'tts_expected', 'latency', 'tts_actual', 'similarity_score', 'pass/fail', 'fail_reason']
-    available_columns = [col for col in display_columns if col in filtered_df.columns]
+    # 결과 테이블 (멀티턴 시나리오 지원)
+    display_columns = ['test_case_id', 'turn_number', 'user_id', 'lng', 'lat', 'message', 'tts_expected', 'latency', 'tts_actual', 'similarity_score', 'pass/fail', 'fail_reason']
+    # 빈 컬럼 제거
+    available_columns = [col for col in display_columns if col in filtered_df.columns and filtered_df[col].notna().any()]
     
     st.dataframe(
         filtered_df[available_columns],

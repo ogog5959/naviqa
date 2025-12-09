@@ -960,6 +960,97 @@ class TestAutomation:
         
         return results
     
+    def _get_column_value(self, df_row, col_name, default=''):
+        """컬럼명 대소문자 구분 없이 값을 가져옵니다."""
+        for key in df_row.index:
+            if key.lower() == col_name.lower():
+                return df_row[key]
+        return df_row.get(col_name, default)
+    
+    def _initialize_chat_for_row(self, row):
+        """행 데이터에서 채팅을 초기화합니다."""
+        # is_driving 값 처리
+        is_driving_value = self._get_column_value(row, 'is_driving', False)
+        if isinstance(is_driving_value, str):
+            is_driving_value = is_driving_value.upper() == 'TRUE'
+        elif isinstance(is_driving_value, (int, float)):
+            is_driving_value = bool(is_driving_value)
+        else:
+            is_driving_value = bool(is_driving_value)
+        
+        self.initialize_chat(
+            user_id=str(self._get_column_value(row, 'user_id', '')),
+            lat=float(self._get_column_value(row, 'lat', 0)),
+            lng=float(self._get_column_value(row, 'lng', 0)),
+            is_driving=is_driving_value
+        )
+    
+    def _execute_turn(self, row, turn_number, test_case_id=None):
+        """한 턴을 실행하고 결과를 반환합니다."""
+        from similarity import calculate_similarity, determine_pass_fail
+        
+        try:
+            # 메시지 전송 및 결과 수집
+            message_value = self._get_column_value(row, 'message', '')
+            test_results = self.send_message_and_collect_results(str(message_value), 0)
+            
+            # Raw JSON에서 TTS 추출
+            tts_from_raw_json = self.extract_tts_from_raw_json(test_results['raw_json'])
+            
+            # TTS 비교 및 Pass/Fail 판정
+            tts_expected = str(self._get_column_value(row, 'tts_expected', ''))
+            user_message = str(message_value)
+            similarity = calculate_similarity(tts_from_raw_json, tts_expected)
+            is_pass, reason = determine_pass_fail(user_message, tts_from_raw_json, tts_expected, use_context=True)
+            
+            # latency에서 숫자만 추출 (ms 단위)
+            latency_ms = None
+            if test_results['latency']:
+                import re
+                latency_match = re.search(r'(\d+)\s*ms', test_results['latency'])
+                if latency_match:
+                    latency_ms = float(latency_match.group(1))
+            
+            # 결과 저장
+            result_row = {
+                'test_case_id': test_case_id if test_case_id is not None else '',
+                'turn_number': turn_number if turn_number is not None else '',
+                'user_id': str(self._get_column_value(row, 'user_id', '')),
+                'lng': self._get_column_value(row, 'lng', ''),
+                'lat': self._get_column_value(row, 'lat', ''),
+                'message': str(message_value),
+                'tts_expected': tts_expected,
+                'latency': latency_ms,
+                'latency_text': test_results['latency'],
+                'response_structured': test_results['response_structured'],
+                'raw_json': test_results['raw_json'],
+                'tts_actual': tts_from_raw_json,
+                'pass/fail': 'PASS' if is_pass else 'FAIL',
+                'similarity_score': similarity,
+                'fail_reason': reason if not is_pass else ''
+            }
+            return result_row
+            
+        except Exception as e:
+            # 오류 발생 시
+            return {
+                'test_case_id': test_case_id if test_case_id is not None else '',
+                'turn_number': turn_number if turn_number is not None else '',
+                'user_id': str(self._get_column_value(row, 'user_id', '')),
+                'lng': self._get_column_value(row, 'lng', ''),
+                'lat': self._get_column_value(row, 'lat', ''),
+                'message': str(self._get_column_value(row, 'message', '')),
+                'tts_expected': str(self._get_column_value(row, 'tts_expected', '')),
+                'latency': None,
+                'latency_text': '',
+                'response_structured': '',
+                'raw_json': '',
+                'tts_actual': '',
+                'pass/fail': 'FAIL',
+                'similarity_score': 0.0,
+                'fail_reason': f'테스트 실행 오류: {str(e)}'
+            }
+    
     def reset_page(self):
         """
         페이지를 리셋하여 새로운 세션을 시작합니다.
@@ -978,6 +1069,7 @@ class TestAutomation:
     def run_tests(self, test_cases: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
         """
         모든 테스트 케이스를 실행합니다.
+        멀티턴 시나리오를 지원합니다 (test_case_id + turn_number).
         
         Args:
             test_cases: 테스트 케이스가 담긴 DataFrame
@@ -989,130 +1081,119 @@ class TestAutomation:
         results = []
         import time as time_module
         
-        total_cases = len(test_cases)
-        start_time = time_module.time()
+        # 컬럼명 대소문자 구분 없이 확인
+        df_columns_lower = {col.lower(): col for col in test_cases.columns}
+        has_test_case_id = 'test_case_id' in df_columns_lower
+        has_turn_number = 'turn_number' in df_columns_lower
         
-        print(f"📊 테스트 시작: 총 {total_cases}개 케이스")
+        # 멀티턴 시나리오인지 확인
+        is_multi_turn = has_test_case_id and has_turn_number
+        
+        if is_multi_turn:
+            # test_case_id별로 그룹화
+            test_case_id_col = df_columns_lower['test_case_id']
+            turn_number_col = df_columns_lower['turn_number']
+            
+            # test_case_id별로 정렬 (turn_number 순서대로)
+            test_cases = test_cases.sort_values([test_case_id_col, turn_number_col])
+            test_case_groups = test_cases.groupby(test_case_id_col)
+            
+            total_scenarios = len(test_case_groups)
+            total_turns = len(test_cases)
+            print(f"📊 멀티턴 시나리오 테스트 시작: 총 {total_scenarios}개 시나리오, {total_turns}개 턴")
+        else:
+            # 기존 방식 (단일 턴)
+            total_cases = len(test_cases)
+            print(f"📊 단일 턴 테스트 시작: 총 {total_cases}개 케이스")
+        
+        start_time = time_module.time()
         
         try:
             self.start_browser()
             print("✅ 브라우저 준비 완료, 테스트 시작")
             
-            for idx, row in test_cases.iterrows():
-                case_num = idx + 1
-                case_start_time = time_module.time()
-                
-                # 진행 상황 업데이트
-                if progress_callback:
-                    elapsed_time = time_module.time() - start_time
-                    if case_num > 1:
-                        avg_time_per_case = elapsed_time / (case_num - 1)
-                        estimated_remaining = avg_time_per_case * (total_cases - case_num)
-                    else:
-                        estimated_remaining = None
+            if is_multi_turn:
+                # 멀티턴 시나리오 실행
+                scenario_num = 0
+                for test_case_id, group in test_case_groups:
+                    scenario_num += 1
+                    scenario_start_time = time_module.time()
                     
-                    progress_callback(
-                        current=case_num,
-                        total=total_cases,
-                        elapsed_time=elapsed_time,
-                        estimated_remaining=estimated_remaining
-                    )
-                try:
+                    # 시나리오의 턴들을 turn_number 순서대로 정렬
+                    scenario_turns = group.sort_values(turn_number_col)
+                    total_turns_in_scenario = len(scenario_turns)
+                    
                     print(f"\n{'='*60}")
-                    print(f"테스트 케이스 {idx + 1}/{len(test_cases)}")
+                    print(f"시나리오 {scenario_num}/{total_scenarios}: test_case_id={test_case_id} ({total_turns_in_scenario}턴)")
                     print(f"{'='*60}")
                     
-                    # 각 테스트 케이스마다 페이지 리셋 (첫 번째 케이스 제외)
-                    if idx > 0:
-                        self.reset_page()
+                    # 각 시나리오의 첫 번째 턴에서만 페이지 리셋 및 초기화
+                    is_initialized = False
                     
-                    # 각 테스트 케이스마다 채팅 초기화
-                    print("🔧 채팅 초기화 중...")
+                    for turn_idx, (turn_row_idx, turn_row) in enumerate(scenario_turns.iterrows()):
+                        turn_number = turn_row[turn_number_col]
+                        turn_num = turn_idx + 1
+                        
+                        # 진행 상황 업데이트
+                        if progress_callback:
+                            elapsed_time = time_module.time() - start_time
+                            completed_turns = sum(len(g) for i, (_, g) in enumerate(test_case_groups) if i < scenario_num - 1) + turn_num
+                            if completed_turns > 1:
+                                avg_time_per_turn = elapsed_time / completed_turns
+                                estimated_remaining = avg_time_per_turn * (total_turns - completed_turns)
+                            else:
+                                estimated_remaining = None
+                            
+                            progress_callback(
+                                current=completed_turns,
+                                total=total_turns,
+                                elapsed_time=elapsed_time,
+                                estimated_remaining=estimated_remaining
+                            )
+                        
+                        print(f"\n  ┌─ Turn {turn_number} ({turn_num}/{total_turns_in_scenario})")
+                        
+                        # 첫 번째 턴에서만 페이지 리셋 및 초기화
+                        # 같은 test_case_id 내에서는 세션 유지 (페이지 리셋 및 초기화 안 함)
+                        if not is_initialized:
+                            # 새로운 시나리오 시작 시에만 페이지 리셋
+                            if scenario_num > 1:
+                                print("  🔄 새로운 시나리오 시작 - 페이지 리셋")
+                                self.reset_page()
+                            
+                            # 채팅 초기화 (첫 번째 턴에서만)
+                            print("  🔧 채팅 초기화 중...")
+                            self._initialize_chat_for_row(turn_row)
+                            is_initialized = True
+                            print("  ✅ 채팅 초기화 완료")
+                            time.sleep(2)
+                        else:
+                            # 같은 시나리오 내의 후속 턴 - 세션 유지, 초기화 없음
+                            print(f"  ℹ️ 같은 시나리오 내 후속 턴 - 세션 유지 (초기화 없음)")
+                        
+                        # 턴 실행 (기존 대화 세션에서 계속)
+                        turn_result = self._execute_turn(turn_row, turn_number, test_case_id)
+                        results.append(turn_result)
+                        
+                        print(f"  └─ Turn {turn_number} 완료: {'PASS' if turn_result.get('pass/fail') == 'PASS' else 'FAIL'}")
                     
-                    # 컬럼명 대소문자 구분 없이 값을 가져오는 헬퍼 함수
-                    def get_column_value(df_row, col_name, default=''):
-                        """컬럼명 대소문자 구분 없이 값을 가져옵니다."""
-                        for key in df_row.index:
-                            if key.lower() == col_name.lower():
-                                return df_row[key]
-                        return df_row.get(col_name, default)
+                    scenario_elapsed = time_module.time() - scenario_start_time
+                    print(f"\n✅ 시나리오 {scenario_num} 완료 (소요: {scenario_elapsed:.1f}초)")
+                
+            else:
+                # 기존 방식 (단일 턴)
+                for idx, row in test_cases.iterrows():
+                    case_num = idx + 1
+                    case_start_time = time_module.time()
                     
-                    # is_driving 값 처리 (컬럼명 대소문자 구분 없이 처리)
-                    # 'is_driving', 'IS_DRIVING' 등 모두 지원
-                    is_driving_value = get_column_value(row, 'is_driving', False)
-                    
-                    # 값이 문자열인 경우 'TRUE', 'true', 'True' 등을 처리
-                    if isinstance(is_driving_value, str):
-                        is_driving_value = is_driving_value.upper() == 'TRUE'
-                    # 값이 숫자인 경우 (1 = True, 0 = False)
-                    elif isinstance(is_driving_value, (int, float)):
-                        is_driving_value = bool(is_driving_value)
-                    # 이미 boolean인 경우 그대로 사용
-                    else:
-                        is_driving_value = bool(is_driving_value)
-                    
-                    self.initialize_chat(
-                        user_id=str(get_column_value(row, 'user_id', '')),
-                        lat=float(get_column_value(row, 'lat', 0)),
-                        lng=float(get_column_value(row, 'lng', 0)),
-                        is_driving=is_driving_value
-                    )
-                    print("✅ 채팅 초기화 완료")
-                    time.sleep(2)  # 초기화 후 안정화 대기
-                    
-                    # 메시지 전송 및 결과 수집 (인덱스 전달)
-                    # 컬럼명 대소문자 구분 없이 처리
-                    message_value = get_column_value(row, 'message')
-                    test_results = self.send_message_and_collect_results(str(message_value), idx)
-                    
-                    # Raw JSON에서 TTS 추출 (비교용)
-                    tts_from_raw_json = self.extract_tts_from_raw_json(test_results['raw_json'])
-                    
-                    # TTS 비교 및 Pass/Fail 판정 (raw_json의 tts와 tts_expected 비교)
-                    # 맥락 기반 판단을 위해 message도 전달
-                    tts_expected = str(get_column_value(row, 'tts_expected', ''))
-                    user_message = str(get_column_value(row, 'message', ''))
-                    similarity = calculate_similarity(tts_from_raw_json, tts_expected)
-                    is_pass, reason = determine_pass_fail(user_message, tts_from_raw_json, tts_expected, use_context=True)
-                    
-                    # latency에서 숫자만 추출 (ms 단위)
-                    latency_ms = None
-                    if test_results['latency']:
-                        import re
-                        latency_match = re.search(r'(\d+)\s*ms', test_results['latency'])
-                        if latency_match:
-                            latency_ms = float(latency_match.group(1))
-                    
-                    # 결과 저장 (컬럼명 대소문자 구분 없이 처리)
-                    result_row = {
-                        'user_id': str(get_column_value(row, 'user_id', '')),  # np.int64 등 숫자 타입을 문자열로 변환
-                        'lng': get_column_value(row, 'lng', ''),
-                        'lat': get_column_value(row, 'lat', ''),
-                        'message': get_column_value(row, 'message', ''),
-                        'tts_expected': tts_expected,
-                        'latency': latency_ms,
-                        'latency_text': test_results['latency'],
-                        'response_structured': test_results['response_structured'],
-                        'raw_json': test_results['raw_json'],
-                        'tts_actual': tts_from_raw_json,  # raw_json에서 추출한 TTS 사용
-                        'pass/fail': 'PASS' if is_pass else 'FAIL',
-                        'similarity_score': similarity,
-                        'fail_reason': reason if not is_pass else ''
-                    }
-                    results.append(result_row)
-                    
-                    case_elapsed = time_module.time() - case_start_time
-                    message_display = str(get_column_value(row, 'message'))[:50]
-                    print(f"({case_num}/{total_cases}) 완료: {message_display}... - {'PASS' if is_pass else 'FAIL'} (소요: {case_elapsed:.1f}초)")
-                    
-                    # 최종 진행 상황 업데이트
+                    # 진행 상황 업데이트
                     if progress_callback:
                         elapsed_time = time_module.time() - start_time
-                        if case_num < total_cases:
-                            avg_time_per_case = elapsed_time / case_num
+                        if case_num > 1:
+                            avg_time_per_case = elapsed_time / (case_num - 1)
                             estimated_remaining = avg_time_per_case * (total_cases - case_num)
                         else:
-                            estimated_remaining = 0
+                            estimated_remaining = None
                         
                         progress_callback(
                             current=case_num,
@@ -1120,27 +1201,67 @@ class TestAutomation:
                             elapsed_time=elapsed_time,
                             estimated_remaining=estimated_remaining
                         )
-                    
-                except Exception as e:
-                    # 테스트 케이스 실행 중 오류 발생
-                    print(f"테스트 케이스 {idx+1} 실행 중 오류: {e}")
-                    # 컬럼명 대소문자 구분 없이 처리 (get_column_value는 위에서 정의됨)
-                    result_row = {
-                        'user_id': str(get_column_value(row, 'user_id', '')),  # np.int64 등 숫자 타입을 문자열로 변환
-                        'lng': get_column_value(row, 'lng', ''),
-                        'lat': get_column_value(row, 'lat', ''),
-                        'message': get_column_value(row, 'message', ''),
-                        'tts_expected': get_column_value(row, 'tts_expected', ''),
-                        'latency': None,
-                        'latency_text': '',
-                        'response_structured': '',
-                        'raw_json': '',
-                        'tts_actual': '',
-                        'pass/fail': 'FAIL',
-                        'similarity_score': 0.0,
-                        'fail_reason': f'테스트 실행 오류: {str(e)}'
-                    }
-                    results.append(result_row)
+                    try:
+                        print(f"\n{'='*60}")
+                        print(f"테스트 케이스 {idx + 1}/{len(test_cases)}")
+                        print(f"{'='*60}")
+                        
+                        # 각 테스트 케이스마다 페이지 리셋 (첫 번째 케이스 제외)
+                        if idx > 0:
+                            self.reset_page()
+                        
+                        # 각 테스트 케이스마다 채팅 초기화
+                        print("🔧 채팅 초기화 중...")
+                        self._initialize_chat_for_row(row)
+                        print("✅ 채팅 초기화 완료")
+                        time.sleep(2)  # 초기화 후 안정화 대기
+                        
+                        # 턴 실행 (단일 턴이므로 turn_number는 None)
+                        turn_result = self._execute_turn(row, turn_number=None, test_case_id=None)
+                        results.append(turn_result)
+                        
+                        case_elapsed = time_module.time() - case_start_time
+                        message_display = str(self._get_column_value(row, 'message', ''))[:50]
+                        pass_fail = turn_result.get('pass/fail', 'FAIL')
+                        print(f"({case_num}/{total_cases}) 완료: {message_display}... - {pass_fail} (소요: {case_elapsed:.1f}초)")
+                        
+                        # 최종 진행 상황 업데이트
+                        if progress_callback:
+                            elapsed_time = time_module.time() - start_time
+                            if case_num < total_cases:
+                                avg_time_per_case = elapsed_time / case_num
+                                estimated_remaining = avg_time_per_case * (total_cases - case_num)
+                            else:
+                                estimated_remaining = 0
+                            
+                            progress_callback(
+                                current=case_num,
+                                total=total_cases,
+                                elapsed_time=elapsed_time,
+                                estimated_remaining=estimated_remaining
+                            )
+                        
+                    except Exception as e:
+                        # 테스트 케이스 실행 중 오류 발생
+                        print(f"테스트 케이스 {idx+1} 실행 중 오류: {e}")
+                        result_row = {
+                            'test_case_id': '',
+                            'turn_number': '',
+                            'user_id': str(self._get_column_value(row, 'user_id', '')),
+                            'lng': self._get_column_value(row, 'lng', ''),
+                            'lat': self._get_column_value(row, 'lat', ''),
+                            'message': str(self._get_column_value(row, 'message', '')),
+                            'tts_expected': str(self._get_column_value(row, 'tts_expected', '')),
+                            'latency': None,
+                            'latency_text': '',
+                            'response_structured': '',
+                            'raw_json': '',
+                            'tts_actual': '',
+                            'pass/fail': 'FAIL',
+                            'similarity_score': 0.0,
+                            'fail_reason': f'테스트 실행 오류: {str(e)}'
+                        }
+                        results.append(result_row)
         
         finally:
             self.close_browser()
