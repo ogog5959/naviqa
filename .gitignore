@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Streamlit
+.streamlit/
+
+# Playwright
+.playwright/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+streamlit.log
+
+# Environment variables
+.env
+.env.local
+
+# Test files
+*.xlsx
+*.xls
+test_results.json
+test_results_*.csv
+evaluation_results_*.csv
+
+# Temporary files
+*.tmp
+*.temp
+
