@@ -252,7 +252,10 @@ def validate_excel_file(df: pd.DataFrame) -> tuple[bool, str]:
     Returns:
         (is_valid: bool, error_message: str)
     """
-    required_columns = ['user_id', 'lat', 'lng', 'is_driving', 'message', 'tts_expected']
+    required_columns = ['user_id', 'lat', 'lng', 'is_driving', 'message']
+    # 선택적 컬럼 (기대값 - 있으면 평가에 사용, 없어도 됨)
+    optional_columns = ['tts_expected', 'action_name_expected', 'action_data_expected', 'next_step_expected']
+    
     df_columns_lower = {col.lower(): col for col in df.columns}
     missing_columns = []
     
@@ -262,6 +265,15 @@ def validate_excel_file(df: pd.DataFrame) -> tuple[bool, str]:
     
     if missing_columns:
         return False, f"필수 컬럼이 없습니다: {', '.join(missing_columns)}"
+    
+    # 선택적 컬럼 확인 (정보만 출력)
+    found_optional = []
+    for opt_col in optional_columns:
+        if opt_col.lower() in df_columns_lower:
+            found_optional.append(opt_col)
+    
+    if found_optional:
+        print(f"ℹ️ 기대값 컬럼 발견: {', '.join(found_optional)}", flush=True)
     
     if df.empty:
         return False, "테스트 케이스가 없습니다."
@@ -398,7 +410,7 @@ with st.sidebar:
     uploaded_file = st.file_uploader(
         "엑셀 파일을 선택하세요",
         type=['xlsx', 'xls'],
-        help="필수 컬럼: user_id, lat, lng, is_driving, message, tts_expected\n멀티턴 시나리오: test_case_id, turn_number 추가"
+        help="필수 컬럼: user_id, lat, lng, is_driving, message\n멀티턴 시나리오: test_case_id, turn_number 추가\n선택적 컬럼(기대값): tts_expected, action_name_expected, action_data_expected, next_step_expected"
     )
     
     if uploaded_file is not None:
@@ -518,8 +530,9 @@ elif st.session_state.test_results is not None:
         # CSV 저장 시 필요한 컬럼만 필터링
         columns_to_save = [
             'test_case_id', 'turn_number', 'user_id', 'lat', 'lng', 'is_driving',
-            'message', 'tts_expected', 'latency', 'tts_actual',
-            'action_name', 'action_data', 'next_step'
+            'message', 'tts_expected', 'action_name_expected', 'action_data_expected', 'next_step_expected',
+            'latency', 'tts_actual', 'action_name', 'action_data', 'next_step',
+            'verdict', 'fail_reason', 'scores'
         ]
         
         # 디버깅: 실제 존재하는 컬럼 확인
@@ -540,7 +553,14 @@ elif st.session_state.test_results is not None:
         if missing_columns:
             st.warning(f"⚠️ CSV에 누락된 컬럼: {missing_columns}")
         
-        filtered_df = results_df[available_columns]
+        filtered_df = results_df[available_columns].copy()
+        
+        # 디버깅: action_name_expected 컬럼 확인
+        if 'action_name_expected' in filtered_df.columns:
+            print(f"🔍 action_name_expected 컬럼 존재, 샘플 값: {filtered_df['action_name_expected'].head(3).tolist()}", flush=True)
+        else:
+            print(f"❌ action_name_expected 컬럼이 filtered_df에 없음!", flush=True)
+            print(f"🔍 results_df에 action_name_expected가 있는지: {'action_name_expected' in results_df.columns}", flush=True)
         
         csv = filtered_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
@@ -554,18 +574,31 @@ elif st.session_state.test_results is not None:
     
     # 요약 통계
     total_cases = len(results_df)
-    pass_count = len(results_df[results_df['pass/fail'] == 'PASS'])
-    fail_count = len(results_df[results_df['pass/fail'] == 'FAIL'])
+    # verdict 컬럼이 있으면 사용, 없으면 pass/fail 사용 (하위 호환성)
+    if 'verdict' in results_df.columns:
+        pass_count = len(results_df[results_df['verdict'] == 'PASS'])
+        partial_count = len(results_df[results_df['verdict'] == 'PARTIAL_PASS'])
+        fail_count = len(results_df[results_df['verdict'] == 'FAIL'])
+    else:
+        # 하위 호환성: pass/fail 컬럼 사용
+        pass_count = len(results_df[results_df['pass/fail'] == 'PASS'])
+        partial_count = 0
+        fail_count = len(results_df[results_df['pass/fail'] == 'FAIL'])
     pass_rate = (pass_count / total_cases * 100) if total_cases > 0 else 0
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("총 테스트 케이스", total_cases)
     with col2:
-        st.metric("PASS", pass_count, delta=f"{pass_rate:.1f}%")
+        st.metric("✅ PASS", pass_count, delta=f"{pass_rate:.1f}%")
     with col3:
-        st.metric("FAIL", fail_count, delta=f"{100-pass_rate:.1f}%")
+        if partial_count > 0:
+            st.metric("⚠️ PARTIAL_PASS", partial_count)
+        else:
+            st.metric("⚠️ PARTIAL_PASS", 0)
     with col4:
+        st.metric("❌ FAIL", fail_count, delta=f"{100-pass_rate:.1f}%")
+    with col5:
         avg_similarity = results_df['similarity_score'].mean() if 'similarity_score' in results_df.columns else 0
         st.metric("평균 유사도", f"{avg_similarity:.2f}")
     
@@ -577,7 +610,12 @@ elif st.session_state.test_results is not None:
         search_query = st.text_input("🔍 검색", value=st.session_state.search_query, placeholder="user_id, message, tts_expected 등으로 검색...")
         st.session_state.search_query = search_query
     with col_filter2:
-        pass_fail_filter = st.selectbox("필터", ["전체", "PASS", "FAIL"], key="pass_fail_filter")
+        # verdict 컬럼이 있으면 사용, 없으면 pass/fail 사용 (하위 호환성)
+        if 'verdict' in results_df.columns:
+            verdict_filter = st.selectbox("필터", ["전체", "PASS", "PARTIAL_PASS", "FAIL"], key="verdict_filter")
+        else:
+            # 하위 호환성
+            pass_fail_filter = st.selectbox("필터", ["전체", "PASS", "FAIL"], key="pass_fail_filter")
     with col_filter3:
         # 멀티턴 시나리오인지 확인
         has_multi_turn = 'test_case_id' in results_df.columns and 'turn_number' in results_df.columns
@@ -597,8 +635,14 @@ elif st.session_state.test_results is not None:
         )
         filtered_df = filtered_df[mask]
     
-    if pass_fail_filter != "전체":
-        filtered_df = filtered_df[filtered_df['pass/fail'] == pass_fail_filter]
+    # verdict 필터 적용
+    if 'verdict' in results_df.columns:
+        if verdict_filter != "전체":
+            filtered_df = filtered_df[filtered_df['verdict'] == verdict_filter]
+    else:
+        # 하위 호환성
+        if pass_fail_filter != "전체":
+            filtered_df = filtered_df[filtered_df['pass/fail'] == pass_fail_filter]
     
     # 시나리오 필터 적용 (멀티턴 시나리오인 경우)
     if has_multi_turn and scenario_filter != "전체":
@@ -607,7 +651,16 @@ elif st.session_state.test_results is not None:
     st.markdown(f"**검색 결과: {len(filtered_df)}개**")
     
     # 결과 테이블 (멀티턴 시나리오 지원)
-    display_columns = ['test_case_id', 'turn_number', 'user_id', 'lng', 'lat', 'message', 'tts_expected', 'latency', 'tts_actual', 'similarity_score', 'pass/fail', 'fail_reason']
+    # 표시할 컬럼 선택
+    if 'verdict' in results_df.columns:
+        display_columns = ['test_case_id', 'turn_number', 'user_id', 'lng', 'lat', 'message', 
+                          'tts_expected', 'action_name_expected', 'action_data_expected', 'next_step_expected',
+                          'latency', 'tts_actual', 'action_name', 'action_data', 'next_step',
+                          'verdict', 'fail_reason', 'scores']
+    else:
+        # 하위 호환성
+        display_columns = ['test_case_id', 'turn_number', 'user_id', 'lng', 'lat', 'message', 
+                          'tts_expected', 'latency', 'tts_actual', 'similarity_score', 'pass/fail', 'fail_reason']
     # 빈 컬럼 제거
     available_columns = [col for col in display_columns if col in filtered_df.columns and filtered_df[col].notna().any()]
     
@@ -641,8 +694,10 @@ elif st.session_state.test_results is not None:
             with col_detail2:
                 st.markdown("**결과 정보**")
                 st.json({
-                    'pass/fail': original_row.get('pass/fail', ''),
+                    'verdict': original_row.get('verdict', original_row.get('pass/fail', '')),
+                    'pass/fail': original_row.get('pass/fail', original_row.get('verdict', '')),
                     'similarity_score': original_row.get('similarity_score', ''),
+                    'scores': original_row.get('scores', ''),
                     'latency': original_row.get('latency', ''),
                     'fail_reason': original_row.get('fail_reason', '')
                 })

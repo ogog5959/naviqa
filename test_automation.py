@@ -1397,6 +1397,7 @@ class TestAutomation:
     def _execute_turn(self, row, turn_number, test_case_id=None):
         """한 턴을 실행하고 결과를 반환합니다."""
         from similarity import calculate_similarity, determine_pass_fail
+        from evaluator import evaluate_comprehensive
         
         try:
             # 메시지 전송 및 결과 수집
@@ -1437,11 +1438,79 @@ class TestAutomation:
             print(f"  📋 최종 추출된 action 필드: action_name='{action_name}', action_data 길이={len(action_data)}, next_step='{next_step}'", flush=True)
             sys.stdout.flush()
             
-            # TTS 비교 및 Pass/Fail 판정
-            tts_expected = str(self._get_column_value(row, 'tts_expected', ''))
+            # 기대값 컬럼 읽기 - row에서 직접 가져오기
+            import pandas as pd
+            
+            # 디버깅: row의 모든 컬럼명 출력
+            print(f"  🔍 row.index 전체: {list(row.index)}", flush=True)
+            
+            # tts_expected (선택적)
+            tts_expected_raw = self._get_column_value(row, 'tts_expected', '')
+            if pd.isna(tts_expected_raw):
+                tts_expected = ''
+            else:
+                tts_expected = str(tts_expected_raw).strip()
+            
+            # action_name_expected - row에서 직접 접근 (여러 방법 시도)
+            action_name_expected = ''
+            # 방법 1: _get_column_value 사용
+            action_name_expected_raw = self._get_column_value(row, 'action_name_expected', '')
+            if action_name_expected_raw and not pd.isna(action_name_expected_raw):
+                action_name_expected = str(action_name_expected_raw).strip()
+            else:
+                # 방법 2: row.index 순회
+                for col in row.index:
+                    if col.lower() == 'action_name_expected':
+                        val = row[col]
+                        if val and not pd.isna(val):
+                            action_name_expected = str(val).strip()
+                            print(f"  ✅ action_name_expected 찾음 (row.index): '{action_name_expected}'", flush=True)
+                        break
+                # 방법 3: 직접 접근 시도
+                if not action_name_expected and 'action_name_expected' in row.index:
+                    val = row['action_name_expected']
+                    if val and not pd.isna(val):
+                        action_name_expected = str(val).strip()
+                        print(f"  ✅ action_name_expected 찾음 (직접 접근): '{action_name_expected}'", flush=True)
+            
+            # action_data_expected
+            action_data_expected = ''
+            action_data_expected_raw = self._get_column_value(row, 'action_data_expected', '')
+            if action_data_expected_raw and not pd.isna(action_data_expected_raw):
+                action_data_expected = str(action_data_expected_raw).strip()
+            
+            # next_step_expected
+            next_step_expected = ''
+            next_step_expected_raw = self._get_column_value(row, 'next_step_expected', '')
+            if next_step_expected_raw and not pd.isna(next_step_expected_raw):
+                next_step_expected = str(next_step_expected_raw).strip()
+            
+            # 디버깅: 읽은 값 확인
+            print(f"  🔍 기대값 읽기 결과: tts_expected='{tts_expected}', action_name_expected='{action_name_expected}', action_data_expected='{action_data_expected[:50] if action_data_expected else ''}', next_step_expected='{next_step_expected}'", flush=True)
+            
+            # 종합 평가 수행
+            evaluation_result = evaluate_comprehensive(
+                raw_json=test_results.get('raw_json', ''),
+                tts_actual=tts_from_raw_json,
+                tts_expected=tts_expected,
+                action_name=action_name or '',
+                action_name_expected=action_name_expected,
+                action_data=action_data or '',
+                action_data_expected=action_data_expected,
+                next_step=next_step or '',
+                next_step_expected=next_step_expected,
+            )
+            
+            verdict = evaluation_result['verdict']
+            fail_reason = evaluation_result['fail_reason']
+            scores = evaluation_result['scores']
+            
+            print(f"  📊 평가 결과: verdict={verdict}, fail_reason={fail_reason[:100] if fail_reason else ''}", flush=True)
+            print(f"  📊 점수: tts={scores['tts']:.2f}, action_name={scores['action_name']:.2f}, action_data={scores['action_data']:.2f}, next_step={scores['next_step']:.2f}", flush=True)
+            
+            # 기존 similarity 계산도 유지 (하위 호환성)
             user_message = str(message_value)
             similarity = calculate_similarity(tts_from_raw_json, tts_expected)
-            is_pass, reason = determine_pass_fail(user_message, tts_from_raw_json, tts_expected, use_context=True)
             
             # latency에서 숫자만 추출 (ms 단위)
             latency_ms = None
@@ -1461,6 +1530,10 @@ class TestAutomation:
                 is_driving_value = bool(is_driving_value)
             
             # 결과 저장
+            import json as json_module
+            # 디버깅: 저장 전 값 확인
+            print(f"  💾 저장할 기대값: action_name_expected='{action_name_expected}', action_data_expected='{action_data_expected[:50] if action_data_expected else ''}', next_step_expected='{next_step_expected}'", flush=True)
+            
             result_row = {
                 'test_case_id': test_case_id if test_case_id is not None else '',
                 'turn_number': turn_number if turn_number is not None else '',
@@ -1469,7 +1542,10 @@ class TestAutomation:
                 'lat': self._get_column_value(row, 'lat', ''),
                 'is_driving': is_driving_value,
                 'message': str(message_value),
-                'tts_expected': tts_expected,
+                'tts_expected': tts_expected if tts_expected else '',
+                'action_name_expected': action_name_expected if action_name_expected else '',  # 빈 문자열로 확실히 저장
+                'action_data_expected': action_data_expected if action_data_expected else '',
+                'next_step_expected': next_step_expected if next_step_expected else '',
                 'latency': latency_ms,
                 'latency_text': test_results['latency'],
                 'response_structured': test_results['response_structured'],
@@ -1478,9 +1554,11 @@ class TestAutomation:
                 'action_name': action_name,
                 'action_data': action_data,
                 'next_step': next_step,
-                'pass/fail': 'PASS' if is_pass else 'FAIL',
+                'verdict': verdict,  # PASS/PARTIAL_PASS/FAIL
+                'pass/fail': verdict,  # 하위 호환성을 위해 유지
                 'similarity_score': similarity,
-                'fail_reason': reason if not is_pass else ''
+                'fail_reason': fail_reason,
+                'scores': json_module.dumps(scores)  # JSON 문자열로 저장
             }
             return result_row
             
@@ -1495,6 +1573,7 @@ class TestAutomation:
             else:
                 is_driving_value = bool(is_driving_value)
             
+            import json as json_module
             return {
                 'test_case_id': test_case_id if test_case_id is not None else '',
                 'turn_number': turn_number if turn_number is not None else '',
@@ -1503,7 +1582,10 @@ class TestAutomation:
                 'lat': self._get_column_value(row, 'lat', ''),
                 'is_driving': is_driving_value,
                 'message': str(self._get_column_value(row, 'message', '')),
-                'tts_expected': str(self._get_column_value(row, 'tts_expected', '')),
+                'tts_expected': str(self._get_column_value(row, 'tts_expected', '')) if self._get_column_value(row, 'tts_expected', '') else '',
+                'action_name_expected': '',  # 오류 시 빈 문자열
+                'action_data_expected': '',
+                'next_step_expected': '',
                 'latency': None,
                 'latency_text': '',
                 'response_structured': '',
@@ -1512,9 +1594,11 @@ class TestAutomation:
                 'action_name': '',
                 'action_data': '',
                 'next_step': '',
-                'pass/fail': 'FAIL',
+                'verdict': 'FAIL',
+                'pass/fail': 'FAIL',  # 하위 호환성
                 'similarity_score': 0.0,
-                'fail_reason': f'테스트 실행 오류: {str(e)}'
+                'fail_reason': f'테스트 실행 오류: {str(e)}',
+                'scores': json_module.dumps({'tts': 0.0, 'action_name': 0.0, 'action_data': 0.0, 'next_step': 0.0})
             }
     
     def reset_page(self):
@@ -1641,7 +1725,8 @@ class TestAutomation:
                         turn_result = self._execute_turn(turn_row, turn_number, test_case_id)
                         results.append(turn_result)
                         
-                        print(f"  └─ Turn {turn_number} 완료: {'PASS' if turn_result.get('pass/fail') == 'PASS' else 'FAIL'}")
+                        verdict = turn_result.get('verdict', turn_result.get('pass/fail', 'FAIL'))
+                        print(f"  └─ Turn {turn_number} 완료: {verdict}")
                     
                     scenario_elapsed = time_module.time() - scenario_start_time
                     print(f"\n✅ 시나리오 {scenario_num} 완료 (소요: {scenario_elapsed:.1f}초)")
@@ -1688,7 +1773,7 @@ class TestAutomation:
                         
                         case_elapsed = time_module.time() - case_start_time
                         message_display = str(self._get_column_value(row, 'message', ''))[:50]
-                        pass_fail = turn_result.get('pass/fail', 'FAIL')
+                        pass_fail = turn_result.get('verdict', turn_result.get('pass/fail', 'FAIL'))
                         print(f"({case_num}/{total_cases}) 완료: {message_display}... - {pass_fail} (소요: {case_elapsed:.1f}초)")
                         
                         # 최종 진행 상황 업데이트
@@ -1737,9 +1822,11 @@ class TestAutomation:
                             'action_name': '',
                             'action_data': '',
                             'next_step': '',
-                            'pass/fail': 'FAIL',
+                            'verdict': 'FAIL',
+                            'pass/fail': 'FAIL',  # 하위 호환성
                             'similarity_score': 0.0,
-                            'fail_reason': f'테스트 실행 오류: {str(e)}'
+                            'fail_reason': f'테스트 실행 오류: {str(e)}',
+                            'scores': json_module.dumps({'tts': 0.0, 'action_name': 0.0, 'action_data': 0.0, 'next_step': 0.0})
                         }
                         results.append(result_row)
         
