@@ -98,26 +98,42 @@ streamlit run app.py
 
 테스트 케이스 엑셀 파일은 다음 컬럼을 포함해야 합니다:
 
+#### 필수 컬럼
+
 | 컬럼명 | 타입 | 설명 | 예시 |
 |--------|------|------|------|
-| `test_case_id` | 문자열/숫자 | (멀티턴) 시나리오 ID | 1 |
-| `turn_number` | 숫자 | (멀티턴) 턴 번호 (1,2,3…) | 1 |
 | `user_id` | 문자열 | 사용자 ID | "user123" |
 | `lat` | 숫자 | 위도 | 37.5665 |
 | `lng` | 숫자 | 경도 | 126.9780 |
 | `is_driving` | boolean/문자열 | 운전 여부 | true / "true" |
 | `message` | 문자열 | 사용자 입력 메시지 | "안녕하세요" |
-| `tts_expected` | 문자열 | 기대 TTS 출력 | "안녕하세요" |
 
-> 멀티턴 시나리오 예시  
+#### 멀티턴 시나리오 컬럼 (선택적)
+
+| 컬럼명 | 타입 | 설명 | 예시 |
+|--------|------|------|------|
+| `test_case_id` | 문자열/숫자 | 시나리오 ID | 1 |
+| `turn_number` | 숫자 | 턴 번호 (1,2,3…) | 1 |
+
+#### 기대값 컬럼 (선택적)
+
+기대값 컬럼이 있으면 평가에 사용하고, 없어도 테스트는 실행됩니다.
+
+| 컬럼명 | 타입 | 설명 | 예시 |
+|--------|------|------|------|
+| `tts_expected` | 문자열 | 기대 TTS 출력 | "안녕하세요" |
+| `action_name_expected` | 문자열 | 기대 action_name | "showConfirmPopup", "deepLink" |
+| `action_data_expected` | 문자열 | 기대 action_data | "추천 장소", "kakaonavi://agent?data=..." |
+| `next_step_expected` | 문자열 | 기대 next_step | "QUESTION", "END" |
+
+> **멀티턴 시나리오 예시**  
 > ```
-> test_case_id | turn_number | user_id | lat | lng | is_driving | message           | tts_expected
-> 1            | 1           | u1      | ... | ... | TRUE       | 강남역 가고싶어     | 강남역 2호선 맞아?
-> 1            | 2           | u1      | ... | ... | TRUE       | 응                 | 안내할게요
-> 2            | 1           | u1      | ... | ... | TRUE       | 강남역 가고싶어     | 강남역 2호선 맞아?
-> 2            | 2           | u1      | ... | ... | TRUE       | 아니               | 취소합니다.
+> test_case_id | turn_number | user_id | lat | lng | is_driving | message           | tts_expected | action_name_expected | next_step_expected
+> 1            | 1           | u1      | ... | ... | TRUE       | 강남역 가고싶어     | 강남역 2호선 맞아? | showConfirmPopup    | QUESTION
+> 1            | 2           | u1      | ... | ... | TRUE       | 응                 | 안내할게요   | deepLink            | END
 > ```
 > - 동일 턴에서 분기가 필요하면 `turn_number`를 2,3 등으로 나누어 넣어주세요. (현재는 같은 턴 번호의 중복을 허용하지 않습니다.)
+> - 기대값 컬럼은 선택적이므로 필요한 경우에만 추가하면 됩니다.
 
 ### 3. 테스트 실행
 
@@ -137,7 +153,9 @@ streamlit run app.py
 
 4. **결과 확인**
    - 테스트 완료 후 자동으로 결과 표시
-   - Pass/Fail, 유사도 점수, 상세 정보 확인
+   - **평가 결과**: PASS / PARTIAL_PASS / FAIL
+   - **점수**: 각 축별 점수 (TTS, action_name, action_data, next_step)
+   - **실패 이유**: 상세한 실패 원인 표시
    - "📥 CSV 다운로드" 버튼으로 결과 저장
 
 ## 📁 프로젝트 구조
@@ -229,15 +247,18 @@ playwright install chromium --force
 
 1. **초기화**: 최초 1회 Request Fields 입력 (user_id, lat, lng, is_driving)
 2. **메시지 전송**: 각 테스트 케이스의 message를 순차적으로 전송
-3. **결과 수집**: latency, response, raw JSON, TTS 추출
-4. **비교 분석**: tts_expected와 실제 TTS 비교하여 유사도 계산
-5. **판정**: 유사도 기반 Pass/Fail 판정
+3. **결과 수집**: latency, response, raw JSON, TTS, action_name, action_data, next_step 추출
+4. **종합 평가**: 기대값과 실제값 비교 (TTS, action_name, action_data, next_step)
+5. **판정**: PASS / PARTIAL_PASS / FAIL 판정
 
-### 유사도 계산
+### 평가 시스템
 
-- 문자열 유사도 알고리즘 사용
-- 맥락 기반 판단 (사용자 메시지 고려)
-- 임계값 기반 Pass/Fail 판정
+- **하드 FAIL 체크**: 에러 응답, 빈 TTS, 실패 메시지 등 즉시 FAIL
+- **축별 평가**: TTS, action_name, action_data, next_step 각각 점수 계산 (0.0~1.0)
+- **종합 판정**:
+  - **PASS**: 모든 기대값 일치
+  - **PARTIAL_PASS**: 일부 기대값 부분 일치 또는 TTS만 낮은 경우
+  - **FAIL**: 주요 기대값 불일치 또는 하드 FAIL 조건 충족
 
 ## 🔒 보안 및 주의사항
 
@@ -260,4 +281,4 @@ playwright install chromium --force
 
 ---
 
-**마지막 업데이트**: 2025-12-05
+**마지막 업데이트**: 2025-12-12
