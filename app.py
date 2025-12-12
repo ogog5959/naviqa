@@ -515,7 +515,34 @@ elif st.session_state.test_results is not None:
     with col_header1:
         st.header("📊 테스트 결과")
     with col_header2:
-        csv = results_df.to_csv(index=False).encode('utf-8-sig')
+        # CSV 저장 시 필요한 컬럼만 필터링
+        columns_to_save = [
+            'test_case_id', 'turn_number', 'user_id', 'lat', 'lng', 'is_driving',
+            'message', 'tts_expected', 'latency', 'tts_actual',
+            'action_name', 'action_data', 'next_step'
+        ]
+        
+        # 디버깅: 실제 존재하는 컬럼 확인
+        import sys
+        print(f"🔍 results_df 컬럼 목록: {list(results_df.columns)}", flush=True)
+        print(f"🔍 필요한 컬럼 목록: {columns_to_save}", flush=True)
+        sys.stdout.flush()
+        
+        # 존재하는 컬럼만 선택
+        available_columns = [col for col in columns_to_save if col in results_df.columns]
+        missing_columns = [col for col in columns_to_save if col not in results_df.columns]
+        
+        print(f"✅ 사용 가능한 컬럼: {available_columns}", flush=True)
+        print(f"❌ 누락된 컬럼: {missing_columns}", flush=True)
+        sys.stdout.flush()
+        
+        # 누락된 컬럼이 있으면 경고 표시
+        if missing_columns:
+            st.warning(f"⚠️ CSV에 누락된 컬럼: {missing_columns}")
+        
+        filtered_df = results_df[available_columns]
+        
+        csv = filtered_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             label="📥 CSV 다운로드",
             data=csv,

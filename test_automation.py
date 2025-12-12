@@ -744,6 +744,415 @@ class TestAutomation:
         
         return ''
     
+    def extract_action_fields_from_raw_json(self, raw_json: str) -> tuple:
+        """
+        Raw JSON에서 action_name, action_data, next_step 필드를 추출합니다.
+        react-json-view 형식도 처리합니다.
+        
+        Args:
+            raw_json: Raw JSON 문자열 (일반 JSON 또는 react-json-view 형식)
+        
+        Returns:
+            (action_name, action_data, next_step) 튜플
+        """
+        action_name = ''
+        action_data = ''
+        next_step = ''
+        
+        if not raw_json or not raw_json.strip():
+            return (action_name, action_data, next_step)
+        
+        try:
+            import json
+            import re
+            import sys
+            
+            # 디버깅: 입력된 raw_json 형식 확인
+            print(f"  🔍 extract_action_fields_from_raw_json 입력: 길이={len(raw_json)}, 처음 300자=\n{raw_json[:300]}", flush=True)
+            
+            # JSON 문자열 정리 (앞뒤 공백 제거)
+            json_str = raw_json.strip()
+            
+            # react-json-view 형식인지 확인 (예: "0:{" 패턴)
+            if re.search(r'\d+:\{', json_str):
+                # react-json-view 형식을 정규 JSON으로 변환
+                # "0:{" -> "{" (배열 인덱스 제거)
+                json_str = re.sub(r'\d+:\{', '{', json_str)
+                # 마지막 "}" 전에 있는 숫자 제거 (배열 끝)
+                json_str = re.sub(r'\}\s*\d+\s*\]', '}]', json_str)
+                # 불필요한 줄바꿈과 공백 정리
+                json_str = re.sub(r'\n\s*', ' ', json_str)
+            
+            # JSON 파싱 시도
+            if json_str.startswith('{') or json_str.startswith('['):
+                try:
+                    json_data = json.loads(json_str)
+                    
+                    # next_step 추출
+                    if isinstance(json_data, dict):
+                        if 'next_step' in json_data:
+                            next_step = str(json_data['next_step'])
+                        
+                        # action 배열 추출
+                        if 'action' in json_data:
+                            action_value = json_data['action']
+                            if isinstance(action_value, list) and len(action_value) > 0:
+                                # 첫 번째 action 요소에서 name과 data 추출
+                                first_action = action_value[0]
+                                if isinstance(first_action, dict):
+                                    if 'name' in first_action:
+                                        action_name = str(first_action['name'])
+                                    if 'data' in first_action:
+                                        # data는 문자열이므로 그대로 저장
+                                        action_data = str(first_action['data'])
+                except (json.JSONDecodeError, ValueError):
+                    # JSON 파싱 실패 - 정규식으로 추출 시도
+                    pass
+            
+            # JSON 파싱 실패했거나 필드가 누락된 경우 정규식으로 직접 추출 시도
+            # (react-json-view 형식 등 비표준 형식 처리)
+            # 원본 raw_json을 사용 (json_str은 변환된 버전일 수 있음)
+            
+            # next_step 추출 (아직 추출 안 된 경우) - 우선순위 높게 처리
+            if not next_step:
+                # "next_step":" 패턴 찾기
+                next_step_pattern = '"next_step"'
+                next_step_idx = raw_json.find(next_step_pattern)
+                
+                print(f"  🔍 next_step 추출 시도: next_step_idx={next_step_idx}", flush=True)
+                
+                if next_step_idx != -1:
+                    # "next_step" 다음 부분
+                    after_next_step = raw_json[next_step_idx + len(next_step_pattern):]
+                    print(f"  🔍 after_next_step[:50]: {after_next_step[:50]}", flush=True)
+                    
+                    # 콜론 찾기
+                    colon_idx = after_next_step.find(':')
+                    print(f"  🔍 colon_idx: {colon_idx}", flush=True)
+                    
+                    if colon_idx != -1:
+                        after_colon = after_next_step[colon_idx + 1:].lstrip()
+                        print(f"  🔍 after_colon[:30]: {after_colon[:30]}", flush=True)
+                        
+                        # 여는 따옴표 찾기
+                        if after_colon and after_colon[0] == '"':
+                            # 따옴표 다음부터 시작
+                            string_start = 1
+                            remaining = after_colon[string_start:]
+                            print(f"  🔍 remaining[:20]: {remaining[:20]}", flush=True)
+                            
+                            # 닫는 따옴표 찾기 (next_step은 간단한 값이므로 이스케이프 없을 가능성 높음)
+                            end_quote = remaining.find('"')
+                            print(f"  🔍 end_quote: {end_quote}", flush=True)
+                            
+                            if end_quote != -1:
+                                next_step = remaining[:end_quote].strip()
+                                print(f"  ✅ next_step 추출 성공 (수동 파싱): '{next_step}'", flush=True)
+                            else:
+                                # 닫는 따옴표가 없으면 줄바꿈이나 } 전까지
+                                end_chars = ['"', '\n', '}', ']', ',']
+                                min_idx = len(remaining)
+                                for char in end_chars:
+                                    idx = remaining.find(char)
+                                    if idx != -1 and idx < min_idx:
+                                        min_idx = idx
+                                if min_idx < len(remaining):
+                                    next_step = remaining[:min_idx].strip()
+                                    print(f"  ✅ next_step 추출 성공 (대체 방법): '{next_step}'", flush=True)
+                        else:
+                            print(f"  ⚠️ after_colon이 따옴표로 시작하지 않음: {after_colon[:20]}", flush=True)
+                    else:
+                        print(f"  ⚠️ 콜론을 찾지 못함", flush=True)
+                else:
+                    print(f"  ⚠️ next_step 패턴을 찾지 못함", flush=True)
+                
+                # 수동 파싱 실패 시 정규식으로 재시도
+                if not next_step:
+                    patterns = [
+                        r'"next_step"\s*:\s*"([^"]+)"',  # 따옴표로 감싸진 경우
+                        r'"next_step"\s*:\s*([A-Z]+)',    # 따옴표 없이 대문자만
+                        r'next_step[":\s]+"?([^",}\]]+)"?',  # 더 유연한 패턴
+                    ]
+                    for pattern in patterns:
+                        next_step_match = re.search(pattern, raw_json, re.IGNORECASE)
+                        if next_step_match:
+                            next_step = next_step_match.group(1).strip('"').strip()
+                            if next_step:
+                                print(f"  ✅ next_step 추출 성공 (정규식, 패턴: {pattern[:30]}): '{next_step}'", flush=True)
+                                break
+                
+                if not next_step:
+                    # 디버깅: raw_json에서 next_step 부분 찾기
+                    debug_start = max(0, next_step_idx - 50) if next_step_idx != -1 else len(raw_json) - 100
+                    debug_end = min(len(raw_json), next_step_idx + 100) if next_step_idx != -1 else len(raw_json)
+                    print(f"  ⚠️ next_step 추출 실패 - raw_json 일부: {raw_json[debug_start:debug_end]}", flush=True)
+            
+            # action name 추출 (배열 첫 번째 요소, react-json-view 형식 고려)
+            if not action_name:
+                # 패턴 1: "action":[0:{"name":"deepLink" (react-json-view 형식)
+                action_name_match = re.search(r'"action"\s*:\s*\[\s*\d+\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"', raw_json, re.IGNORECASE | re.DOTALL)
+                if action_name_match:
+                    action_name = action_name_match.group(1)
+                else:
+                    # 패턴 2: "action":[{"name":"deepLink" (일반 JSON 형식)
+                    action_name_match = re.search(r'"action"\s*:\s*\[\s*\{\s*"name"\s*:\s*"([^"]+)"', raw_json, re.IGNORECASE | re.DOTALL)
+                    if action_name_match:
+                        action_name = action_name_match.group(1)
+            
+            # action data 추출 (긴 문자열, 중괄호 포함 가능)
+            if not action_data:
+                # "data":" 패턴 찾기
+                data_pattern = '"data"'
+                data_idx = raw_json.find(data_pattern)
+                
+                if data_idx != -1:
+                    # "data" 다음 부분
+                    search_start = data_idx + len(data_pattern)
+                    remaining_text = raw_json[search_start:]
+                    
+                    # 콜론과 따옴표 찾기
+                    colon_idx = remaining_text.find(':')
+                    if colon_idx != -1:
+                        after_colon = remaining_text[colon_idx + 1:].lstrip()
+                        # 여는 따옴표 찾기
+                        if after_colon and after_colon[0] == '"':
+                            # 따옴표 다음부터 시작 (문자열 시작)
+                            string_start = 1
+                            string_content = after_colon[string_start:]
+                            
+                            # action_data는 항상 }}로 끝나므로, }} 다음의 "를 찾기
+                            # }}" 패턴 찾기
+                            end_pattern = '}}"'
+                            end_idx = string_content.find(end_pattern)
+                            if end_idx != -1:
+                                # }}" 앞까지가 action_data
+                                action_data = string_content[:end_idx + 2]  # }} 포함
+                                # 이스케이프 시퀀스 처리
+                                action_data = action_data.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                                print(f"  ✅ action_data 추출 성공 (}} 패턴): 길이={len(action_data)}", flush=True)
+                            else:
+                                # }} 패턴이 없으면 중괄호 균형을 맞춰서 닫는 따옴표 찾기
+                                # action_data는 JSON 문자열이므로 중괄호가 균형을 이뤄야 함
+                                brace_count = 0
+                                i = 0
+                                found_end = False
+                                
+                                while i < len(string_content):
+                                    # 이스케이프 문자 확인
+                                    if string_content[i] == '\\' and i + 1 < len(string_content):
+                                        # 이스케이프된 문자는 건너뛰기
+                                        i += 2
+                                        continue
+                                    
+                                    # 중괄호 카운트
+                                    if string_content[i] == '{':
+                                        brace_count += 1
+                                    elif string_content[i] == '}':
+                                        brace_count -= 1
+                                        # 모든 중괄호가 닫혔고, 다음에 "가 오면 끝
+                                        if brace_count == 0:
+                                            # } 다음의 " 찾기
+                                            after_brace = string_content[i + 1:].lstrip()
+                                            if after_brace and after_brace[0] == '"':
+                                                # } 다음의 "까지가 action_data (} 포함)
+                                                action_data = string_content[:i + 1]
+                                                # 이스케이프 시퀀스 처리
+                                                action_data = action_data.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                                                print(f"  ✅ action_data 추출 성공 (중괄호 균형): 길이={len(action_data)}", flush=True)
+                                                found_end = True
+                                                break
+                                    
+                                    i += 1
+                                
+                                # 중괄호 균형 방법이 실패하면 이스케이프를 고려하여 닫는 따옴표 찾기
+                                if not found_end:
+                                    i = 0
+                                    while i < len(string_content):
+                                        if string_content[i] == '\\' and i + 1 < len(string_content):
+                                            if string_content[i + 1] == '"':
+                                                i += 2
+                                            else:
+                                                i += 1
+                                        elif string_content[i] == '"':
+                                            action_data = string_content[:i]
+                                            action_data = action_data.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                                            print(f"  ✅ action_data 추출 성공 (이스케이프 고려): 길이={len(action_data)}", flush=True)
+                                            found_end = True
+                                            break
+                                        else:
+                                            i += 1
+                                    
+                                    if not found_end:
+                                        print(f"  ⚠️ action_data 닫는 따옴표를 찾지 못함", flush=True)
+                
+                # 수동 파싱 실패 시 정규식으로 재시도
+                if not action_data:
+                    pattern = r'"data"\s*:\s*"((?:[^"\\]|\\.)*)"'
+                    action_data_match = re.search(pattern, raw_json, re.IGNORECASE | re.DOTALL)
+                    if action_data_match:
+                        action_data = action_data_match.group(1)
+                        action_data = action_data.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                        print(f"  ✅ action_data 추출 성공 (정규식): 길이={len(action_data)}", flush=True)
+                
+                if not action_data:
+                    print(f"  ⚠️ action_data 추출 실패", flush=True)
+            
+        except (json.JSONDecodeError, ValueError) as e:
+            # JSON 파싱 실패해도 정규식 추출은 시도했으므로 계속 진행
+            pass
+        except Exception as e:
+            import sys
+            print(f"  ⚠️ Raw JSON에서 action 필드 추출 중 예상치 못한 오류: {e}", flush=True)
+            sys.stdout.flush()
+        
+        return (action_name, action_data, next_step)
+    
+    def extract_action_fields_from_response_structured(self, response_structured: str) -> tuple:
+        """
+        Response (structured)에서 action_name, action_data, next_step 필드를 추출합니다.
+        
+        Args:
+            response_structured: Response (structured) 문자열
+        
+        Returns:
+            (action_name, action_data, next_step) 튜플
+        """
+        action_name = ''
+        action_data = ''
+        next_step = ''
+        
+        if not response_structured or not response_structured.strip():
+            return (action_name, action_data, next_step)
+        
+        try:
+            import re
+            import sys
+            
+            # 디버깅: 입력된 response_structured 형식 확인
+            print(f"  🔍 extract_action_fields_from_response_structured 입력: 길이={len(response_structured)}, 처음 300자=\n{response_structured[:300]}", flush=True)
+            
+            # next_step 추출
+            # response_structured에는 next_step이 없을 수 있으므로 raw_json에서 추출한 값 사용
+            # 여기서는 response_structured에 next_step이 있는 경우만 추출
+            if not next_step:
+                # 패턴: "next_step: END" 또는 "next_step": "END" 등
+                next_step_patterns = [
+                    r'next_step[:\s]+"?([^",}\n]+)"?',
+                    r'"next_step"[:\s]+"?([^",}\n]+)"?',
+                    r'next_step[:\s]+([A-Z]+)',  # END 같은 대문자 값
+                ]
+                for pattern in next_step_patterns:
+                    next_step_match = re.search(pattern, response_structured, re.IGNORECASE)
+                    if next_step_match:
+                        next_step = next_step_match.group(1).strip('"').strip()
+                        if next_step:
+                            print(f"  ✅ response_structured에서 next_step 추출 성공: '{next_step}'", flush=True)
+                            break
+            
+            # action name 추출
+            # 패턴: "name": "deepLink" 또는 name: deepLink 등
+            action_name_patterns = [
+                r'"name"[:\s]+"([^"]+)"',
+                r'name[:\s]+"([^"]+)"',
+                r'name[:\s]+([a-zA-Z]+)',  # deepLink 같은 값
+            ]
+            for pattern in action_name_patterns:
+                action_name_match = re.search(pattern, response_structured, re.IGNORECASE | re.DOTALL)
+                if action_name_match:
+                    action_name = action_name_match.group(1).strip()
+                    if action_name:
+                        print(f"  ✅ response_structured에서 action_name 추출 성공: '{action_name}'", flush=True)
+                        break
+            
+            # action data 추출 (긴 문자열, 중괄호 포함)
+            # response_structured에서도 수동 파싱 시도
+            if not action_data:
+                # "data":" 이후부터 시작
+                data_start_pattern = r'"data"[:\s]+"'
+                data_start_match = re.search(data_start_pattern, response_structured, re.IGNORECASE)
+                
+                if data_start_match:
+                    start_pos = data_start_match.end()
+                    remaining = response_structured[start_pos:]
+                    
+                    # action_data는 항상 }}로 끝나므로, }} 다음의 "를 찾기
+                    end_pattern = '}}"'
+                    end_idx = remaining.find(end_pattern)
+                    if end_idx != -1:
+                        # }}" 앞까지가 action_data
+                        action_data = remaining[:end_idx + 2]  # }} 포함
+                        action_data = action_data.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                        print(f"  ✅ response_structured에서 action_data 추출 성공 (}} 패턴): 길이={len(action_data)}", flush=True)
+                    else:
+                        # }} 패턴이 없으면 중괄호 균형을 맞춰서 닫는 따옴표 찾기
+                        brace_count = 0
+                        i = 0
+                        found_end = False
+                        
+                        while i < len(remaining):
+                            if remaining[i] == '\\' and i + 1 < len(remaining):
+                                i += 2
+                                continue
+                            
+                            if remaining[i] == '{':
+                                brace_count += 1
+                            elif remaining[i] == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    after_brace = remaining[i + 1:].lstrip()
+                                    if after_brace and after_brace[0] == '"':
+                                        action_data = remaining[:i + 1]
+                                        action_data = action_data.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                                        print(f"  ✅ response_structured에서 action_data 추출 성공 (중괄호 균형): 길이={len(action_data)}", flush=True)
+                                        found_end = True
+                                        break
+                            
+                            i += 1
+                        
+                        if not found_end:
+                            i = 0
+                            while i < len(remaining):
+                                if remaining[i] == '\\' and i + 1 < len(remaining):
+                                    if remaining[i + 1] == '"':
+                                        i += 2
+                                    else:
+                                        i += 1
+                                elif remaining[i] == '"':
+                                    action_data = remaining[:i]
+                                    action_data = action_data.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                                    print(f"  ✅ response_structured에서 action_data 추출 성공 (이스케이프 고려): 길이={len(action_data)}", flush=True)
+                                    found_end = True
+                                    break
+                                else:
+                                    i += 1
+                            
+                            if not found_end:
+                                print(f"  ⚠️ response_structured에서 action_data 닫는 따옴표를 찾지 못함", flush=True)
+                
+                # 정규식으로 재시도
+                if not action_data:
+                    action_data_patterns = [
+                        r'"data"[:\s]+"((?:[^"\\]|\\.)*)"',  # 이스케이프 고려
+                        r'data[:\s]+"((?:[^"\\]|\\.)*)"',
+                    ]
+                    for pattern in action_data_patterns:
+                        action_data_match = re.search(pattern, response_structured, re.IGNORECASE | re.DOTALL)
+                        if action_data_match:
+                            action_data = action_data_match.group(1)
+                            action_data = action_data.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+                            if action_data:
+                                print(f"  ✅ response_structured에서 action_data 추출 성공 (정규식): 길이={len(action_data)}", flush=True)
+                                break
+            
+        except Exception as e:
+            import sys
+            print(f"  ⚠️ response_structured에서 action 필드 추출 중 오류: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            sys.stdout.flush()
+        
+        return (action_name, action_data, next_step)
+    
     def extract_tts(self) -> str:
         """
         TTS 출력을 추출합니다. (레거시 메서드, 호환성 유지)
@@ -997,6 +1406,37 @@ class TestAutomation:
             # Raw JSON에서 TTS 추출
             tts_from_raw_json = self.extract_tts_from_raw_json(test_results['raw_json'])
             
+            # Raw JSON에서 action 필드 추출
+            # 디버깅: raw_json 실제 내용 확인
+            raw_json_content = test_results.get('raw_json', '')
+            print(f"  🔍 Raw JSON 전체 내용 ({len(raw_json_content)}자):\n{raw_json_content}", flush=True)
+            
+            # raw_json에서 먼저 추출 시도
+            action_name, action_data, next_step = self.extract_action_fields_from_raw_json(test_results['raw_json'])
+            import sys
+            
+            # raw_json에서 추출 실패한 경우 response_structured에서 시도
+            if not action_name or not action_data or not next_step:
+                print(f"  ⚠️ raw_json에서 일부 필드 추출 실패, response_structured에서 시도...", flush=True)
+                response_structured_content = test_results.get('response_structured', '')
+                print(f"  🔍 Response (structured) 전체 내용 ({len(response_structured_content)}자):\n{response_structured_content}", flush=True)
+                
+                rs_action_name, rs_action_data, rs_next_step = self.extract_action_fields_from_response_structured(response_structured_content)
+                
+                # response_structured에서 추출한 값으로 보완
+                if not action_name and rs_action_name:
+                    action_name = rs_action_name
+                    print(f"  ✅ response_structured에서 action_name 보완: '{action_name}'", flush=True)
+                if not action_data and rs_action_data:
+                    action_data = rs_action_data
+                    print(f"  ✅ response_structured에서 action_data 보완: 길이={len(action_data)}", flush=True)
+                if not next_step and rs_next_step:
+                    next_step = rs_next_step
+                    print(f"  ✅ response_structured에서 next_step 보완: '{next_step}'", flush=True)
+            
+            print(f"  📋 최종 추출된 action 필드: action_name='{action_name}', action_data 길이={len(action_data)}, next_step='{next_step}'", flush=True)
+            sys.stdout.flush()
+            
             # TTS 비교 및 Pass/Fail 판정
             tts_expected = str(self._get_column_value(row, 'tts_expected', ''))
             user_message = str(message_value)
@@ -1011,6 +1451,15 @@ class TestAutomation:
                 if latency_match:
                     latency_ms = float(latency_match.group(1))
             
+            # is_driving 값 처리
+            is_driving_value = self._get_column_value(row, 'is_driving', False)
+            if isinstance(is_driving_value, str):
+                is_driving_value = is_driving_value.upper() == 'TRUE'
+            elif isinstance(is_driving_value, (int, float)):
+                is_driving_value = bool(is_driving_value)
+            else:
+                is_driving_value = bool(is_driving_value)
+            
             # 결과 저장
             result_row = {
                 'test_case_id': test_case_id if test_case_id is not None else '',
@@ -1018,6 +1467,7 @@ class TestAutomation:
                 'user_id': str(self._get_column_value(row, 'user_id', '')),
                 'lng': self._get_column_value(row, 'lng', ''),
                 'lat': self._get_column_value(row, 'lat', ''),
+                'is_driving': is_driving_value,
                 'message': str(message_value),
                 'tts_expected': tts_expected,
                 'latency': latency_ms,
@@ -1025,6 +1475,9 @@ class TestAutomation:
                 'response_structured': test_results['response_structured'],
                 'raw_json': test_results['raw_json'],
                 'tts_actual': tts_from_raw_json,
+                'action_name': action_name,
+                'action_data': action_data,
+                'next_step': next_step,
                 'pass/fail': 'PASS' if is_pass else 'FAIL',
                 'similarity_score': similarity,
                 'fail_reason': reason if not is_pass else ''
@@ -1033,12 +1486,22 @@ class TestAutomation:
             
         except Exception as e:
             # 오류 발생 시
+            # is_driving 값 처리
+            is_driving_value = self._get_column_value(row, 'is_driving', False)
+            if isinstance(is_driving_value, str):
+                is_driving_value = is_driving_value.upper() == 'TRUE'
+            elif isinstance(is_driving_value, (int, float)):
+                is_driving_value = bool(is_driving_value)
+            else:
+                is_driving_value = bool(is_driving_value)
+            
             return {
                 'test_case_id': test_case_id if test_case_id is not None else '',
                 'turn_number': turn_number if turn_number is not None else '',
                 'user_id': str(self._get_column_value(row, 'user_id', '')),
                 'lng': self._get_column_value(row, 'lng', ''),
                 'lat': self._get_column_value(row, 'lat', ''),
+                'is_driving': is_driving_value,
                 'message': str(self._get_column_value(row, 'message', '')),
                 'tts_expected': str(self._get_column_value(row, 'tts_expected', '')),
                 'latency': None,
@@ -1046,6 +1509,9 @@ class TestAutomation:
                 'response_structured': '',
                 'raw_json': '',
                 'tts_actual': '',
+                'action_name': '',
+                'action_data': '',
+                'next_step': '',
                 'pass/fail': 'FAIL',
                 'similarity_score': 0.0,
                 'fail_reason': f'테스트 실행 오류: {str(e)}'
@@ -1244,12 +1710,23 @@ class TestAutomation:
                     except Exception as e:
                         # 테스트 케이스 실행 중 오류 발생
                         print(f"테스트 케이스 {idx+1} 실행 중 오류: {e}")
+                        
+                        # is_driving 값 처리
+                        is_driving_value = self._get_column_value(row, 'is_driving', False)
+                        if isinstance(is_driving_value, str):
+                            is_driving_value = is_driving_value.upper() == 'TRUE'
+                        elif isinstance(is_driving_value, (int, float)):
+                            is_driving_value = bool(is_driving_value)
+                        else:
+                            is_driving_value = bool(is_driving_value)
+                        
                         result_row = {
                             'test_case_id': '',
                             'turn_number': '',
                             'user_id': str(self._get_column_value(row, 'user_id', '')),
                             'lng': self._get_column_value(row, 'lng', ''),
                             'lat': self._get_column_value(row, 'lat', ''),
+                            'is_driving': is_driving_value,
                             'message': str(self._get_column_value(row, 'message', '')),
                             'tts_expected': str(self._get_column_value(row, 'tts_expected', '')),
                             'latency': None,
@@ -1257,6 +1734,9 @@ class TestAutomation:
                             'response_structured': '',
                             'raw_json': '',
                             'tts_actual': '',
+                            'action_name': '',
+                            'action_data': '',
+                            'next_step': '',
                             'pass/fail': 'FAIL',
                             'similarity_score': 0.0,
                             'fail_reason': f'테스트 실행 오류: {str(e)}'
