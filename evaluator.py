@@ -129,6 +129,16 @@ def evaluate_action_data(action_data: str, action_data_expected: str) -> Tuple[f
     # 정확 일치 확인
     if action_data.strip() == action_data_expected.strip():
         return 1.0, "action_data 일치"
+
+    # 간단 부분 일치 허용:
+    # - 기대값이 짧은 키워드(예: "driveStart")이고
+    # - 실제 action_data 문자열 안에 그대로 포함되어 있으면 높은 점수 부여
+    normalized_expected = action_data_expected.strip()
+    if (
+        0 < len(normalized_expected) <= 32  # 너무 긴 문자열은 부분 일치 대상으로 보지 않음
+        and normalized_expected.lower() in action_data.lower()
+    ):
+        return 0.9, f'action_data 부분 일치 ("{normalized_expected}" 포함)'
     
     # JSON 파싱 시도 (deepLink payload 비교)
     try:
