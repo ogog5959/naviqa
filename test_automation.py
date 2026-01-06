@@ -1198,31 +1198,109 @@ class TestAutomation:
             # 이전 응답이 완전히 끝날 때까지 대기 (latency 최대 7초 고려)
             print(f"  ⏳ 이전 응답 완료 대기 중...")
             time.sleep(2)  # 기본 대기
-            
+
+            # Text Input 탭 활성화 (있을 경우)
+            try:
+                text_input_tab = self.page.locator('button:has-text("Text Input")')
+                if text_input_tab.count() > 0:
+                    tab = text_input_tab.first
+                    print('  ✅ Text Input 탭 찾음: button:has-text("Text Input")')
+                    try:
+                        aria_pressed = (tab.get_attribute("aria-pressed") or "").lower()
+                        kind_attr = (tab.get_attribute("kind") or "").lower()
+                        is_active = aria_pressed == "true" or "primary" in kind_attr
+                    except Exception:
+                        is_active = False
+
+                    if not is_active:
+                        print("  ⚙️ Text Input 탭이 비활성화 상태, 클릭하여 활성화")
+                        tab.click()
+                        time.sleep(0.5)
+                    else:
+                        print("  ✅ Text Input 탭이 이미 활성화됨")
+            except Exception as e:
+                print(f"  ⚠️ Text Input 탭 처리 중 오류 (계속 진행): {e}")
+
             # 메시지 입력창 찾기 (더 정확하게, 여러 방법 시도)
             message_input = None
             max_input_retries = 5
             
             for retry in range(max_input_retries):
                 try:
-                    # 방법 1: aria-label로 찾기
-                    message_input = self.page.locator('textarea[aria-label="Your Message"]')
+                    # 방법 1: 한국어 placeholder (예: "메시지", "메시지를 입력")
+                    message_input = self.page.locator(
+                        'textarea[placeholder*="메시지" i], textarea[placeholder*="메시지를 입력" i]'
+                    )
                     if message_input.count() > 0:
-                        print(f"  ✅ 메시지 입력창 찾음 (aria-label, 시도 {retry + 1})")
+                        print(f'  ✅ 메시지 입력창 찾음 (placeholder*="메시지", 시도 {retry + 1})')
                         break
-                    
-                    # 방법 2: 모든 textarea 중 마지막 것 (가장 최근)
-                    all_textareas = self.page.locator('textarea')
+
+                    # 방법 2: 한국어/영어 aria-label
+                    message_input = self.page.locator(
+                        'textarea[aria-label*="메시지" i], '
+                        'textarea[aria-label*="message" i], '
+                        'textarea[aria-label="Your Message"]'
+                    )
+                    if message_input.count() > 0:
+                        print(f'  ✅ 메시지 입력창 찾음 (aria-label, 시도 {retry + 1})')
+                        break
+
+                    # 방법 3: Text Input 영역 내부 textarea 우선 탐색
+                    text_input_panels = self.page.locator(
+                        'section[aria-label="Text Input"], div[aria-label="Text Input"]'
+                    )
+                    if text_input_panels.count() > 0:
+                        panel = text_input_panels.last
+                        panel_textareas = panel.locator('textarea')
+                        if panel_textareas.count() > 0:
+                            message_input = panel_textareas.last
+                            print(f"  ✅ 메시지 입력창 찾음 (Text Input 패널 내부, 시도 {retry + 1})")
+                            break
+
+                    # 방법 4: label 텍스트로 찾기
+                    labels = self.page.locator('label')
+                    for i in range(labels.count()):
+                        try:
+                            label_el = labels.nth(i)
+                            text = (label_el.inner_text() or "").strip()
+                            if not text:
+                                continue
+                            lower = text.lower()
+                            if "message" in lower or "메시지" in lower:
+                                candidate = label_el.locator("textarea")
+                                if candidate.count() == 0:
+                                    parent = label_el.locator("..")
+                                    candidate = parent.locator("textarea")
+                                if candidate.count() > 0:
+                                    message_input = candidate
+                                    print(f"  ✅ 메시지 입력창 찾음 (label 기반, 시도 {retry + 1})")
+                                    break
+                        except Exception:
+                            continue
+                    if message_input and message_input.count() > 0:
+                        break
+
+                    # 방법 5: 모든 textarea 중 rows 속성이 가장 큰 것 선택 (채팅창일 가능성 높음)
+                    all_textareas = self.page.locator("textarea")
                     if all_textareas.count() > 0:
-                        message_input = all_textareas.last
-                        print(f"  ✅ 메시지 입력창 찾음 (마지막 textarea, 시도 {retry + 1})")
-                        break
-                    
-                    # 방법 3: placeholder로 찾기
-                    message_input = self.page.locator('textarea[placeholder*="message" i], textarea[placeholder*="Message" i]')
-                    if message_input.count() > 0:
-                        print(f"  ✅ 메시지 입력창 찾음 (placeholder, 시도 {retry + 1})")
-                        break
+                        max_rows = -1
+                        selected_textarea = None
+                        for i in range(all_textareas.count()):
+                            ta = all_textareas.nth(i)
+                            try:
+                                rows_attr = ta.get_attribute("rows")
+                                rows = int(rows_attr) if rows_attr is not None else 0
+                                if rows >= max_rows:
+                                    max_rows = rows
+                                    selected_textarea = ta
+                            except Exception:
+                                continue
+                        if selected_textarea:
+                            message_input = selected_textarea
+                            print(
+                                f"  ✅ 메시지 입력창 찾음 (가장 큰 textarea, rows={max_rows}, 시도 {retry + 1})"
+                            )
+                            break
                     
                     if retry < max_input_retries - 1:
                         print(f"  ⚠️ 메시지 입력창 찾기 실패, 재시도 중... (시도 {retry + 1}/{max_input_retries})")
@@ -1289,15 +1367,38 @@ class TestAutomation:
                     results['error'] = f"메시지 입력 실패: {str(e2)}"
                     return results
             
-            # "Send Message" 버튼 클릭
-            send_button = self.page.locator('button:has-text("Send Message")')
-            if send_button.count() > 0:
-                send_button.first.click()
-                print(f"  ✅ Send 버튼 클릭")
+            # "Send Text" / "Send Message" 버튼 클릭
+            send_button = None
+            send_button_texts = ["Send Text", "Send Message", "Send"]
+
+            for button_text in send_button_texts:
+                candidate = self.page.locator(f'button:has-text("{button_text}")')
+                if candidate.count() > 0:
+                    send_button = candidate
+                    print(f'  ✅ {button_text} 버튼 찾음')
+                    break
+
+            if send_button and send_button.count() > 0:
+                try:
+                    # 버튼이 보이는지 확인하고 클릭
+                    send_button.first.wait_for(state="visible", timeout=3000)
+                    send_button.first.click()
+                    print(f"  ✅ Send 버튼 클릭 완료")
+                except Exception as e:
+                    print(f"  ⚠️ Send 버튼 클릭 실패, Enter 키로 전송 시도: {e}")
+                    try:
+                        message_input.first.press("Enter")
+                        print(f"  ✅ Enter 키로 전송")
+                    except Exception as e2:
+                        print(f"  ⚠️ Enter 키 전송도 실패: {e2}")
             else:
-                # Enter 키로 전송 시도
-                message_input.first.press('Enter')
-                print(f"  ✅ Enter 키로 전송")
+                # 버튼을 찾지 못한 경우 Enter 키로 전송 시도
+                print(f"  ⚠️ Send 버튼을 찾을 수 없음, Enter 키로 전송 시도")
+                try:
+                    message_input.first.press("Enter")
+                    print(f"  ✅ Enter 키로 전송")
+                except Exception as e:
+                    print(f"  ⚠️ Enter 키 전송 실패: {e}")
             
             # 응답이 완전히 로드될 때까지 대기 (latency 최대 7초 + 여유시간 고려)
             print(f"  ⏳ 응답 대기 중... (latency 최대 7초 고려)")
